@@ -4,10 +4,29 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: make
+        run: make CC=${{ matrix.cc }} CFLAGS='-O2 -Werror'
+      - name: Test
+        run: make CC=${{ matrix.cc }} CFLAGS='-O2 -Werror' check
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test with ASan and UBSan
+        run: >-
+          make CC=gcc check
+          CFLAGS='-O1 -g -Werror -fsanitize=address,undefined
+          -fno-sanitize-recover=all -fno-omit-frame-pointer'
