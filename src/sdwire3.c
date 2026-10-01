@@ -11,16 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #define SYS_USB_DEVICES "/sys/bus/usb/devices"
 #define SYS_BLOCK_CLASS "/sys/class/block"
 #define SYS_USB_DRIVERS_PROBE "/sys/bus/usb/drivers_probe"
 #define DEV_USB_FMT "/dev/bus/usb/%03u/%03u"
-#define STATE_POLL_INTERVAL_NS 50000000L
-#define STATE_POLL_ATTEMPTS 100
 
 static int
 read_text(const char *path, char *buf, size_t size)
@@ -463,9 +459,7 @@ sdwire3_free(struct sdwire3_device *devices)
 int
 sdwire3_get_state(const struct sdwire3_device *dev, enum sdwire3_state *state)
 {
-    char interface_path[SDWIRE3_PATH_MAX];
     char path[SDWIRE3_PATH_MAX];
-    struct stat st;
     int n;
 
     if (dev == NULL || state == NULL) {
@@ -473,21 +467,8 @@ sdwire3_get_state(const struct sdwire3_device *dev, enum sdwire3_state *state)
         return -1;
     }
 
-    n = snprintf(interface_path, sizeof(interface_path), "%s/%s",
+    n = snprintf(path, sizeof(path), "%s/%s/driver",
         SYS_USB_DEVICES, dev->interface_name);
-    if (n < 0 || (size_t)n >= sizeof(interface_path)) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-
-    if (stat(interface_path, &st) < 0)
-        return -1;
-    if (!S_ISDIR(st.st_mode)) {
-        errno = ENODEV;
-        return -1;
-    }
-
-    n = snprintf(path, sizeof(path), "%s/driver", interface_path);
     if (n < 0 || (size_t)n >= sizeof(path)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -510,7 +491,6 @@ int
 sdwire3_set_state(struct sdwire3_device *dev, enum sdwire3_state state)
 {
     enum sdwire3_state current;
-    int attempt;
 
     if (dev == NULL) {
         errno = EINVAL;
@@ -540,27 +520,7 @@ sdwire3_set_state(struct sdwire3_device *dev, enum sdwire3_state state)
     if (usb_reset(dev) < 0)
         return -1;
 
-    if (sdwire3_refresh(dev) < 0)
-        return -1;
-
-    for (attempt = 0; attempt < STATE_POLL_ATTEMPTS; attempt++) {
-        if (sdwire3_get_state(dev, &current) == 0 && current == state)
-            return 0;
-
-        if (attempt + 1 < STATE_POLL_ATTEMPTS) {
-            struct timespec delay;
-
-            delay.tv_sec = 0;
-            delay.tv_nsec = STATE_POLL_INTERVAL_NS;
-            while (nanosleep(&delay, &delay) < 0) {
-                if (errno != EINTR)
-                    return -1;
-            }
-        }
-    }
-
-    errno = ETIMEDOUT;
-    return -1;
+    return sdwire3_refresh(dev);
 }
 
 const char *
