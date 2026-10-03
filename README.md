@@ -80,8 +80,10 @@ Block-device correlation is topology based. Entries under:
 
 are resolved to their real sysfs paths and matched against the SDWire3 USB
 device subtree. Partition entries are ignored. In host mode the block device
-appears a moment after `switch` returns (usb-storage waits about a second
-before scanning), so scripts should wait for it, e.g. with `udevadm settle`.
+appears 1.5 to 4.5 seconds after `switch` returns (see
+[Hardware test results](#hardware-test-results)). `udevadm settle` returns
+before that, so scripts should poll until the block device exists, e.g.
+`until [ -b /dev/sdb ]; do sleep 0.1; done`.
 
 ## Build
 
@@ -111,7 +113,9 @@ Reload the rules (`udevadm control --reload`) and replug the SDWire3.
 ## Known limitations
 
 - `0bda:0316` is a Realtek card reader ID. Any other card reader with the
-  same ID is listed and switched as if it were an SDWire3.
+  same ID is listed and switched as if it were an SDWire3. The SDWire3 does
+  not help here: it reports manufacturer `Generic`, product `USB3.0-CRW` and
+  the serial `20120501030900000`, the same strings as a plain reader.
 - The host cannot see the physical mux. The reported state is the driver
   binding that selects it, as in `sdwire-cli`.
 - `switch target` does not check whether the card is mounted. Unmount it
@@ -126,15 +130,65 @@ The layers are kept small:
   block-device correlation.
 - `include/sdwire3.h` is the public interface.
 
-The switching sequence has not yet been run against physical SDWire3
-hardware. Suggested first checks:
+## Hardware test results
 
-1. `csdwire3 list` shows the SDWire3 in host mode with a block device.
-2. `cat /sys/bus/usb/devices/<port>/{manufacturer,product,serial}` shows
-   whether the SDWire3 can be told apart from a plain Realtek reader, and
-   whether serials differ between units.
-3. `sudo csdwire3 switch target`: `csdwire3 state` reports `target`, the
-   target sees the card, and `dmesg` shows the driver detaching and a reset
-   without the device re-enumerating.
-4. `sudo csdwire3 switch host`: the state is `host` again and the block
-   device returns.
+Tested on 2026-10-03 against one physical SDWire3, side by side with the
+reference `sdwire-cli` 0.3.1 (PyPI package `sdwire`).
+
+Setup:
+
+- Host: Raspberry Pi 400, Debian 13, kernel 6.18 (aarch64), gcc 14.2.
+- SDWire3 USB on a USB 2.0 port (port `1-1.2`, high speed).
+- Target: the Pi 400's own microSD slot (`mmc0`, `sdhci-iproc`), so the
+  same machine is both host and target.
+- Card: 128 GB SDXC.
+
+Functional checks, all passed:
+
+1. `csdwire3 list` shows the SDWire3 in host mode with `/dev/sdb`.
+2. `switch target`: `state` reports `target`, `/dev/sdb` goes away and the
+   target sees the card as `/dev/mmcblk0`. `dmesg` shows a reset of the same
+   USB device number, without re-enumeration.
+3. `switch host`: `state` reports `host`, the target drops the card and
+   `/dev/sdb` returns.
+4. Switching to the current state does nothing (about 20 ms).
+5. The `<serial>.<ports>` ID printed by `sdwire-cli` is accepted by `-s`.
+
+Comparison with `sdwire-cli`:
+
+- `strace` shows the same requests in the same order: `USBDEVFS_IOCTL`
+  with `USBDEVFS_CONNECT` or `USBDEVFS_DISCONNECT` on interface 0, then
+  `USBDEVFS_RESET`.
+- The two tools agree on the state whichever of them did the switch.
+- From the reset to `/dev/sdb` both take the same time (2.71 s in a
+  logged side-by-side run).
+
+Timing, 10 cycles per tool, usb-storage `delay_use=0`. "cmd" is the run time
+of the switch command; the other columns are measured from its start:
+
+| Tool       | cmd target | `/dev/mmcblk0` | cmd host | `/dev/sdb`         |
+|------------|-----------:|---------------:|---------:|-------------------:|
+| csdwire3   |     0.30 s |         1.19 s |   0.21 s | 1.87 to 3.64 s     |
+| sdwire-cli |     0.73 s |         1.41 s |   0.64 s | 2.36 to 2.48 s     |
+
+csdwire3 itself takes about 0.2 s. With the default `delay_use=1` the block
+device appeared 4.46 s after `switch host` in all 10 runs. The time until
+the block device appears is spent outside csdwire3:
+
+- usb-storage waits `delay_use` seconds (default 1) before scanning a new
+  device. usb-storage is often built into the kernel, so set it at runtime,
+  e.g. with `/etc/tmpfiles.d/usb-storage-delay.conf`:
+
+  ```
+  w /sys/module/usb_storage/parameters/delay_use - - - - 0
+  ```
+
+- The card reader reports "not ready" until the target has released the
+  card. Here the Pi's SD controller polls for card removal about once a
+  second. `/dev/sdb` appeared 1.3 to 1.6 s after the target logged
+  `card removed`, in every run. The polling explains why the totals vary in
+  steps of about a second.
+
+The measurements come from this setup only. A target that does not poll the
+card, or is powered off while switching, should give a shorter and steadier
+host switch. Repeat the timing with a separate target board.
